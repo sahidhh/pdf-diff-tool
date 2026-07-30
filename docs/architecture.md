@@ -236,19 +236,18 @@ The disagreement rate self-tunes per document. There is no threshold to guess, a
 
 ## 7. Triage rules (tier 0 — no model)
 
-Applied in order.
+Applied in order. **Superseded in part by D-22** — see the note at the end.
 
 **Drop as noise** — never sent, never charged:
 - `before` and `after` are equal after normalising commas, whitespace, and currency symbols (`1,000` vs `1000`). On financial documents this typically removes a large fraction of raw changes before anything else runs.
 
-**Resolve locally** when all hold:
-- `tag == "replace"` (pairing unambiguous)
-- normalised `a1_left` and `a2_left` agree (case, punctuation, trailing `:` ignored)
-- the anchor candidate is ≤ 6 words (longer strings are sentence fragments, not field names)
+**Resolve locally** — run `a2_left` through `analyze._label()`. If a field name comes out, that is the anchor. `_label()` strips what geometry drags in alongside the label: leading line numbers and item letters (`22 `, `13 a `), trailing cross-references (` 13a`, ` 204`), `SEE STATEMENT n` pointers, and dangling words where the walk overran (`of the`, `(see`). It returns `None` when what is left is all figures, over `ANCHOR_MAX_WORDS`, or carries a 5-digit run dragged in from a neighbouring column.
 
-**Fast path, highest precision:** if `a2_left` ends with `:`, strip the colon — that is the anchor. Costs one line and dominates on form-shaped documents.
+**Confidence, not resolution, is where A1 is still used:** if normalised `a1_left` and `a2_left` agree, the row is `high`; A2 alone is `medium`. Two independent methods converging is still the strongest signal available (D-03) — it just no longer gates *whether* a row resolves, because A1 is unusable on grid layouts (D-21).
 
-**Escalate** everything else. Notably `insert` and `delete` with no counterpart — a whole clause added or removed genuinely needs semantic judgment, and that is where the model earns its cost.
+**Leave unanchored** when `_label()` returns `None`. The row still renders with its values and `confidence: low`. Nothing is hidden.
+
+> **D-22 note.** This section originally escalated the unresolved set to a model and capped anchors at 6 words. The Phase 3 bake-off measured the model returning `a2_left` verbatim on 17 of 19 changes, so the model tier is now opt-in (`PDF_DIFF_USE_MODEL=1`) and the cap is 8 words. §8's verification and §10's request shape still apply whenever it is switched on.
 
 ---
 

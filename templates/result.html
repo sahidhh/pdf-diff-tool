@@ -15,6 +15,7 @@
     .toggle button { padding: 0.35rem 0.9rem; font-size: 0.95rem; cursor: pointer;
                      border: 1px solid #aaa; background: #fff; }
     .toggle button[aria-pressed="true"] { background: #333; color: #fff; border-color: #333; }
+    .toggle button.analyze { margin-left: 0.75rem; }
     table { border-collapse: collapse; width: 100%; table-layout: fixed; }
     th, td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; text-align: left; background: #fff; }
     .page-header td { background: #eef; font-weight: 600; }
@@ -58,7 +59,14 @@
   <p class="toggle">
     <button type="button" id="pdf-btn" aria-pressed="true">PDF view</button
     ><button type="button" id="text-btn" aria-pressed="false">Text view</button>
+    {% if change_records %}
+      <button type="button" id="analyze-btn" class="analyze">Analyze differences</button>
+    {% endif %}
   </p>
+
+  <!-- The change records ride in the page and get POSTed back to /analyze, so the
+       server keeps no state between the two requests (decisions.md D-04). -->
+  <script type="application/json" id="changes">{{ change_records|tojson }}</script>
 
   <table>
     <thead>
@@ -105,6 +113,21 @@
     }
     pdfBtn.onclick = () => show(false);
     textBtn.onclick = () => show(true);
+
+    const analyzeBtn = document.getElementById('analyze-btn');
+    if (analyzeBtn) analyzeBtn.onclick = async () => {
+      analyzeBtn.disabled = true;
+      analyzeBtn.textContent = 'Analyzing…';
+      const res = await fetch('/analyze', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: document.getElementById('changes').textContent,
+      });
+      // ponytail: /analyze returns a whole page, so swap the document rather than
+      // rebuilding the table in JS. document.write after load replaces it wholesale.
+      const html = await res.text();
+      document.open(); document.write(html); document.close();
+    };
   </script>
 </body>
 </html>

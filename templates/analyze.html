@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Diff — structured changes</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; background: #f6f6f8; }
+    .summary { color: #555; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; background: #fff;
+             vertical-align: top; }
+    th { background: #eef; }
+    .badge { border-radius: 3px; font-size: 0.75rem; padding: 0.1rem 0.4rem; color: #fff; }
+    .badge.local { background: #3a5; }
+    .badge.model { background: #46a; }
+    .badge.unverified { background: #a33; }
+    .conf-high { color: #2a6; }
+    .conf-medium { color: #a70; }
+    .conf-low { color: #a33; }
+    del { background: #ffd0d0; text-decoration: line-through; }
+    ins { background: #cdf6cd; text-decoration: none; }
+    .empty { color: #888; font-style: italic; }
+    .truncated { display: block; margin-top: 0.35rem; color: #777; font-size: 0.8rem; font-style: italic; }
+    /* Unverified rows are shown, never hidden — silently dropping them hides drift. */
+    .unverified-row td { background: #fff6f6; }
+    button { padding: 0.35rem 0.9rem; font-size: 0.95rem; cursor: pointer;
+             border: 1px solid #aaa; background: #fff; }
+  </style>
+</head>
+<body>
+  {% set local = rows|selectattr('source', 'equalto', 'local')|list|length %}
+  {% set unverified = rows|rejectattr('verified')|list|length %}
+  <h1>Structured changes</h1>
+  {# A whole appended page arrives as one insert opcode — 11,837 characters on a real
+     1065 pair, which made one row 68% of the table. Show the head, keep the rest in the
+     JSON download. #}
+  {% macro value(text, tag) %}
+    {%- if not text -%}
+      <span class="empty">—</span>
+    {%- elif text|length <= 300 -%}
+      <{{ tag }}>{{ text }}</{{ tag }}>
+    {%- else -%}
+      <{{ tag }}>{{ text[:300] }}…</{{ tag }}>
+      <span class="truncated">{{ "{:,}".format(text|length) }} characters — full value in the JSON download</span>
+    {%- endif -%}
+  {% endmacro %}
+
+  {% set anchored = rows|selectattr('anchor')|list|length %}
+  <p class="summary">
+    {{ rows|length }} change{{ '' if rows|length == 1 else 's' }} —
+    {{ anchored }} with an identified field,
+    {{ rows|length - anchored }} without.
+    {% if rows|length != local %}{{ rows|length - local }} resolved by the model.{% endif %}
+    {% if unverified %}
+      <strong>{{ unverified }} could not be verified against the diff</strong> and
+      {{ 'is' if unverified == 1 else 'are' }} flagged below.
+    {% endif %}
+    <a href="/">Compare another pair</a>
+  </p>
+  <p class="summary">
+    Values in the Base and Edited columns always come from the diff itself.
+    {% if rows|length == local %}
+      <span>Anchors were resolved on this machine; nothing was sent anywhere.</span>
+    {% else %}
+      <span>Anchors badged <span class="badge model">model</span> came from a hosted model, verified against the diff.</span>
+    {% endif %}
+  </p>
+
+  <p><button type="button" id="download-btn">Download JSON</button></p>
+
+  {% if rows %}
+    <table>
+      <thead>
+        <tr>
+          <th style="width:4rem">Page</th>
+          <th>Anchor</th>
+          <th>Base</th>
+          <th>Edited</th>
+          <th style="width:6rem">Kind</th>
+          <th style="width:7rem">Confidence</th>
+          <th style="width:6rem">Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr{% if not row.verified %} class="unverified-row"{% endif %}>
+            <td>{{ row.page }}</td>
+            <td>{% if row.anchor %}{{ row.anchor }}{% else %}<span class="empty">no anchor identified</span>{% endif %}</td>
+            <td>{{ value(row.base_value, 'del') }}</td>
+            <td>{{ value(row.comp_value, 'ins') }}</td>
+            <td>{{ row.kind }}</td>
+            <td class="conf-{{ row.confidence }}">{{ row.confidence }}</td>
+            <td>
+              <span class="badge {{ row.source }}">{{ row.source }}</span>
+              {% if not row.verified %}<span class="badge unverified">unverified</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">Nothing resolved locally.</p>
+  {% endif %}
+
+  <script type="application/json" id="rows">{{ rows|tojson }}</script>
+  <script>
+    document.getElementById('download-btn').onclick = () => {
+      const blob = new Blob([document.getElementById('rows').textContent],
+                            {type: 'application/json'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'changes.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  </script>
+</body>
+</html>

@@ -5,3 +5,4 @@ jinja2
 pymupdf
 pytesseract
 pillow
+openai  # OpenAI-compatible client, pointed at OpenRouter — see docs/architecture.md §10

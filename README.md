@@ -24,10 +24,46 @@ that folder to `PATH` or set `pytesseract.pytesseract.tesseract_cmd` to the exe.
 ## Run
 
 ```bash
-uvicorn app:app --reload
+uvicorn app:app --reload --host 127.0.0.1
 ```
 
 Open <http://localhost:8000>, pick a base PDF and an edited PDF, hit Compare.
+
+`127.0.0.1` is uvicorn's default, stated explicitly because `/analyze` is
+unauthenticated and must not be reachable from the network (`docs/decisions.md` D-12).
+
+To generate a Phase 0 dump for tuning `SAME_LINE_TOL`:
+
+```bash
+python diff_engine.py --dump base.pdf edited.pdf > dump.json
+```
+
+## Analyze differences
+
+The result page has an **Analyze differences** button that turns the word diff into
+`{anchor, base_value, comp_value}` rows — the field each change belongs to, and what it
+went from and to.
+
+**This runs entirely on your machine.** Nothing is uploaded, no key is needed. Anchors
+come from the nearest label to the left on the printed line, cleaned up locally. Changes
+with no identifiable field still appear, with their values and a low confidence marker —
+nothing is hidden because it couldn't be labelled.
+
+### The optional model tier (off by default)
+
+A hosted-model tier exists for corpora where the local heuristic struggles:
+
+```bash
+export PDF_DIFF_USE_MODEL=1                        # off unless set
+export OPENROUTER_API_KEY=...                      # environment only, never a file
+export PDF_DIFF_MODEL=qwen/qwen3-30b-a3b-instruct-2507   # bake-off winner, see D-20
+```
+
+It is off because it was measured and did not earn its cost: on a Form 1065 pair it
+returned the anchor the local pass had already found, verbatim, on 17 of 19 changes
+(`docs/decisions.md` D-20, D-22). Switched on, it sends a few words per unresolved
+change — never whole pages — and every value it returns is checked against the diff, with
+anything unbacked rendered flagged rather than silently dropped.
 
 ## How it works
 

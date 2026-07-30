@@ -243,6 +243,130 @@ Companion to `architecture.md`. Date: 2026-07-30.
 
 ---
 
+## D-20 — Phase 3 bake-off run; the model tier did not earn its cost on 1065 forms
+
+**Date.** 2026-07-30. **Corpus.** One Form 1065 pair (`pdf_a.pdf` / `pdf_b.pdf`), 6 base
+pages vs 10 comp pages, native text layer, 20 raw changes → 1 dropped, 0 resolved
+locally, 19 escalated.
+
+**Shortlist method.** D-11's, followed literally: OpenRouter `/models` filtered to
+`supported_parameters` containing `structured_outputs` (285 models), then the cheap tier
+by estimated cost for this payload. Not chosen from reputation or documentation.
+
+| Model | Latency | Answered | Verified | Verbatim A2 echo |
+|---|---|---|---|---|
+| `qwen/qwen3-30b-a3b-instruct-2507` | 41.0s | 19/19 | 19/19 | **17/19** |
+| `mistralai/mistral-nemo` | 60.8s | 18/19 | 16/19 | 16/19 |
+| `openai/gpt-5-nano` | 108.8s | 17/19 | 16/19 | — |
+| `openai/gpt-oss-20b` | 13.8s | 14/19 | 14/19 | 14/19 |
+| `meta-llama/llama-3.1-8b-instruct` | 175.2s | 10/19 | 9/19 | — |
+| `inclusionai/ling-2.6-flash` | 8.5s | 1/19 | 1/19 | — |
+| `mistralai/mistral-small-24b-instruct-2501` | — | provider 429 | — | — |
+
+Cost for the winner ≈ **$0.0004 per comparison** (~5.2k in / ~0.8k out at $0.048/$0.193
+per M). `z-ai/glm-4.5-air`, the pre-bake-off placeholder, **404s** under
+`require_parameters: true` + `data_collection: "deny"` — no provider satisfies both.
+D-13's guard behaving exactly as designed, and a disqualification rather than a reason to
+relax D-12.
+
+**Finding.** The winning model returned `a2_left` verbatim on 17 of 19 changes. It is a
+pass-through of the geometric anchor, not a source of judgement. This is not a model
+failure — the system prompt says to pick between two candidates, and A1 is unusable on
+this document family (see below), so A2 is always the correct pick. The design assumed
+A1 would be right often enough for the choice to be meaningful.
+
+Of the two non-echoes, one was **wrong**: qwen3-30b answered `"DEVELOPMENT"` — the
+changed value itself — as the anchor for a `DEPLOYEMENT -> DEVELOPMENT` change, and it
+**passed verification**, because §8's anchor check ran against a haystack that included
+`before`/`after`. Fixed: the anchor is now checked against the context fields only. A
+label never lives inside the span that changed.
+
+**Not decided here.** Whether to keep the model tier at all for this corpus. Evidence
+says A2 alone reproduces ~90% of the model's output for $0. Recorded so the choice is
+made against numbers.
+
+**Revisit when.** A document family arrives where A1 is sound, making the A1/A2 choice
+real work again — that is the condition under which this bake-off's premise holds.
+
+---
+
+## D-21 — A1 confirmed unusable on grid-layout tax forms (answers open question 6)
+
+**Context.** `implementation-plan.md` open question 6 asked whether multi-column reading
+order actually bites. D-18 deferred layout-aware regions until a real in-scope document
+proved it. The 1065 pair proves it.
+
+**Measured.** A1/A2 agreement **0/20 = 0%**. A1 returns interleaved header, footer and
+cross-column text: the context for a preparer-name change came back as
+`'SD8480 A84Y 10/10/2025 10:09:32 V24-7.1F 3001330238 BEN JERRY'`. The colon fast path
+never fires either — 1065 forms label by line number (`13a`, `22`), not `Name:`.
+
+Consequence: the local tier resolved **0%** and everything escalated. The agreement gate
+(D-03, "the load-bearing idea of the design") cannot fire when one of its two methods is
+structurally broken on the corpus.
+
+**A2, by contrast, works** once tuned — `"22 Total liabilities and capital"`,
+`"notes, bonds payable in 1 year or more"`, `"13 a Cash contributions SEE STATEMENT 3 13a"`
+are correct labels pulled purely from geometry.
+
+**Options, none chosen yet:**
+- *Layout-aware column bucketing* — fixes A1 properly, revives the agreement gate, and is
+  what D-18 deferred. Largest job.
+- *A2-only local tier* — resolve on A2 alone with a local cleanup pass, drop the model for
+  this family. Cheapest, and the bake-off says it loses almost nothing.
+- *Status quo* — pay ~$0.0004 per comparison for what is largely an A2 pass-through.
+
+**Revisit.** Immediately — this blocks the Phase 1 decision gate, which cannot be
+evaluated honestly while one anchor method is broken. **Resolved by D-22.**
+
+---
+
+## D-22 — A2-only local tier; the model becomes opt-in
+
+**Decided.** Resolve anchors from A2 alone, cleaned by `analyze._label()`. The model tier
+stays in the codebase but is off unless `PDF_DIFF_USE_MODEL=1`. Default behaviour makes
+no network call, so the tool is local-only again as `pdf-diff-tool-spec.md` line 6 always
+wanted.
+
+**Measured, same 1065 pair, 20 raw changes:**
+
+| | Before (model tier) | After (A2-only) |
+|---|---|---|
+| Resolved locally | 0 | **14** |
+| Unanchored | — | 5 |
+| Model calls | 1 | **0** |
+| Cost per comparison | ~$0.0004 | **$0** |
+| Latency added | 41s | **0s** |
+
+The local anchors are also *better* than the model's, because the model echoed A2 raw:
+it answered `"13 a Cash contributions SEE STATEMENT 3 13a"`; `_label()` gives
+`"Cash contributions"`. Same for `"3 Net income (loss) (see"` → `"Net income (loss)"` and
+`"22 Total liabilities and capital"` → `"Total liabilities and capital"`.
+
+The 5 unanchored changes are honest gaps — A2 found either nothing or nothing but figures
+to the left. They render with their values and `confidence: low`, never hidden.
+
+**Rejected:**
+- *Column-bucketed A1 (D-18's fix)* — the correct long-term fix and still open, but it is
+  a second reading-order system built to revive an agreement gate whose practical output
+  A2 already supplies. Not worth it until a corpus needs A1 for its own sake.
+- *Deleting the model tier* — it is written, tested, and costs nothing switched off. D-20
+  records the condition under which it earns its place again.
+
+**Consequences.**
+- `confidence` is now `medium` for most rows: A2 alone is one method with no
+  corroboration. `high` still requires A1/A2 agreement, which fires on prose corpora.
+- `ANCHOR_MAX_WORDS` raised 6 → 8. `"notes, bonds payable in 1 year or more"` is a real
+  balance-sheet label at 8 words; the §7 cap of 6 discarded it.
+- `_label()`'s rules are tuned on **one** document family. They are form-shaped — line
+  numbers, `SEE STATEMENT` pointers, trailing cross-references. A prose corpus will want
+  different ones, and should get a dump first, the way these did.
+
+**Revisit when.** A second document family is measured. If `_label()` mangles it, the
+rules need splitting per family rather than extending in place.
+
+---
+
 ## Under review (not decided)
 
 See `recommendations.md` — an externally-proposed parser chain (OpenDataLoader PDF / Docling / MinerU) and model fallback chain (Qwen3-8B → DeepSeek V3.1 → GLM-4.5-Air → Gemini Flash → Mistral Small), verified against public pricing/docs. The model fallback chain **conflicts with D-08** (single model, no failover) — flagged there, not merged in here, until that conflict is deliberately resolved.
@@ -265,5 +389,5 @@ See `recommendations.md` — an externally-proposed parser chain (OpenDataLoader
 | Parallelizing analysis for large batches | Real usage shows batch comparisons, not one-at-a-time |
 | Alternative diff algorithm (move-aware, see D-17) | Document reordering shows up as a real, common case |
 | Second OCR provider / `OCRProvider` interface built out (see D-14) | pytesseract needs a partner or fallback |
-| Layout-aware multi-column reading regions (see D-18) | Two-column documents confirmed in the target corpus |
+| Layout-aware multi-column reading regions (see D-18) | ~~Two-column documents confirmed in the target corpus~~ **TRIGGERED 2026-07-30 — see D-21** |
 | Semantic page alignment — replace index pairing in `align_pages()` with fingerprint / label / heading / layout / token similarity (see D-19, `architecture.md` §19) | Documents regularly contain inserted, reordered, or merged pages |
