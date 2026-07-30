@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Diff</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 34rem; }
+    label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
+    .error { background: #fdd; border-left: 4px solid #c00; padding: 0.75rem; }
+    button { display: block; margin-top: 1.5rem; padding: 0.5rem 1.25rem; font-size: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>PDF Diff</h1>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form action="/compare" method="post" enctype="multipart/form-data">
+    <label for="base">Base PDF</label>
+    <input id="base" type="file" name="base" accept="application/pdf" required>
+
+    <label for="edited">Edited PDF</label>
+    <input id="edited" type="file" name="edited" accept="application/pdf" required>
+
+    <button type="submit">Compare</button>
+  </form>
+</body>
+</html>

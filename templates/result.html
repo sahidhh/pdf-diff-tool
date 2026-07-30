@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Diff — result</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; background: #f6f6f8; }
+    .summary { color: #555; }
+    .legend span, .source { padding: 0.1rem 0.4rem; border-radius: 3px; }
+    .legend .del { background: rgba(255, 0, 0, 0.28); }
+    .legend .ins { background: rgba(0, 190, 0, 0.30); }
+    .source { background: #e6e9f2; color: #333; font-size: 0.85rem; font-weight: normal; }
+    .toggle { margin: 0.75rem 0; }
+    .toggle button { padding: 0.35rem 0.9rem; font-size: 0.95rem; cursor: pointer;
+                     border: 1px solid #aaa; background: #fff; }
+    .toggle button[aria-pressed="true"] { background: #333; color: #fff; border-color: #333; }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; text-align: left; background: #fff; }
+    .page-header td { background: #eef; font-weight: 600; }
+    .badge { background: #444; color: #fff; border-radius: 3px; font-size: 0.75rem; padding: 0.1rem 0.4rem; margin-left: 0.5rem; }
+    .missing { color: #888; font-style: italic; }
+
+    /* The page image and its overlay share one positioning context, and every box
+       is expressed in % of that box, so the highlights track the image at any width. */
+    .page { position: relative; display: block; line-height: 0; }
+    .page img { width: 100%; height: auto; box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
+    .box { position: absolute; border-radius: 2px; }
+    .box.insert { background: rgba(0, 190, 0, 0.30); outline: 1px solid rgba(0, 130, 0, 0.55); }
+    .box.delete {
+      background: rgba(255, 0, 0, 0.28);
+      outline: 1px solid rgba(180, 0, 0, 0.55);
+      /* strikethrough drawn across the word, since the page itself is an image */
+      background-image: linear-gradient(to bottom, transparent 45%, rgba(170,0,0,0.85) 45%,
+                                        rgba(170,0,0,0.85) 55%, transparent 55%);
+    }
+
+    .text-view { font-family: ui-monospace, monospace; font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap; }
+    ins { background: #cdf6cd; text-decoration: none; }
+    del { background: #ffd0d0; text-decoration: line-through; }
+
+    /* One class on <body> decides which of the two renderings is shown. */
+    body.text .page { display: none; }
+    body:not(.text) .text-view { display: none; }
+  </style>
+</head>
+<body>
+  <h1>PDF Diff</h1>
+  <p class="summary">
+    <strong>{{ base_name }}</strong> vs <strong>{{ edited_name }}</strong> —
+    {% if changes %}{{ changes }} changed word{{ '' if changes == 1 else 's' }}{% else %}no differences{% endif %}.
+    <a href="/">Compare another pair</a>
+  </p>
+  <p class="legend">
+    <span class="del">removed</span> from base &nbsp;·&nbsp; <span class="ins">added</span> in edited
+  </p>
+
+  <p class="toggle">
+    <button type="button" id="pdf-btn" aria-pressed="true">PDF view</button
+    ><button type="button" id="text-btn" aria-pressed="false">Text view</button>
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:50%">Base <span class="source">{{ base_source }}</span></th>
+        <th style="width:50%">Edited <span class="source">{{ edited_source }}</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr class="page-header">
+          <td>Page {{ row.page }}{% if row.base and row.base.ocr %}<span class="badge">OCR</span>{% endif %}</td>
+          <td>Page {{ row.page }}{% if row.edited and row.edited.ocr %}<span class="badge">OCR</span>{% endif %}</td>
+        </tr>
+        <tr>
+          {% for side in [row.base, row.edited] %}
+            <td>
+              {% if side %}
+                <div class="page">
+                  <img src="data:image/png;base64,{{ side.png }}" alt="Page {{ row.page }}">
+                  {% for box in side.boxes %}
+                    <div class="box {{ box.tag }}" title="{{ box.word }}"
+                         style="left:{{ box.left }}%; top:{{ box.top }}%; width:{{ box.width }}%; height:{{ box.height }}%"></div>
+                  {% endfor %}
+                </div>
+                <div class="text-view">{% for seg in side.segments %}{% if seg.tag == 'delete' %}<del>{{ seg.words|join(' ') }}</del>{% elif seg.tag == 'insert' %}<ins>{{ seg.words|join(' ') }}</ins>{% else %}{{ seg.words|join(' ') }}{% endif %} {% endfor %}</div>
+              {% else %}
+                <p class="missing">no page {{ row.page }} in this document</p>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    const pdfBtn = document.getElementById('pdf-btn');
+    const textBtn = document.getElementById('text-btn');
+    function show(text) {
+      document.body.classList.toggle('text', text);
+      pdfBtn.setAttribute('aria-pressed', String(!text));
+      textBtn.setAttribute('aria-pressed', String(text));
+    }
+    pdfBtn.onclick = () => show(false);
+    textBtn.onclick = () => show(true);
+  </script>
+</body>
+</html>
