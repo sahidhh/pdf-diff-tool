@@ -15,7 +15,11 @@
     .toggle button { padding: 0.35rem 0.9rem; font-size: 0.95rem; cursor: pointer;
                      border: 1px solid #aaa; background: #fff; }
     .toggle button[aria-pressed="true"] { background: #333; color: #fff; border-color: #333; }
-    .toggle button.analyze { margin-left: 0.75rem; }
+    .status { margin-left: 0.75rem; color: #666; font-size: 0.9rem; }
+    .status.error { color: #a33; }
+    .rerun { margin-top: -0.25rem; }
+    .rerun label { font-size: 0.9rem; color: #555; margin-right: 0.4rem; }
+    .rerun select { padding: 0.25rem; font-size: 0.9rem; margin-right: 0.4rem; }
     table { border-collapse: collapse; width: 100%; table-layout: fixed; }
     th, td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; text-align: left; background: #fff; }
     .page-header td { background: #eef; font-weight: 600; }
@@ -40,9 +44,31 @@
     ins { background: #cdf6cd; text-decoration: none; }
     del { background: #ffd0d0; text-decoration: line-through; }
 
-    /* One class on <body> decides which of the two renderings is shown. */
-    body.text .page { display: none; }
-    body:not(.text) .text-view { display: none; }
+    /* One class on <body> decides which of the three views is shown. Analysis is a view
+       here, not a separate page, so Back and the toggle both keep working. */
+    body.view-text .page { display: none; }
+    body:not(.view-text) .text-view { display: none; }
+    body.view-analysis #diff-view { display: none; }
+    body:not(.view-analysis) #analysis { display: none; }
+
+    /* Analysis table */
+    #analysis .summary { color: #555; }
+    #analysis th { background: #eef; }
+    #analysis .badge { border-radius: 3px; font-size: 0.75rem; padding: 0.1rem 0.4rem;
+                       color: #fff; margin-left: 0; }
+    #analysis .badge.local { background: #3a5; }
+    #analysis .badge.model { background: #46a; }
+    #analysis .badge.unverified { background: #a33; }
+    #analysis .conf-high { color: #2a6; }
+    #analysis .conf-medium { color: #a70; }
+    #analysis .conf-low { color: #a33; }
+    #analysis .empty { color: #888; font-style: italic; }
+    #analysis .truncated { display: block; margin-top: 0.35rem; color: #777;
+                           font-size: 0.8rem; font-style: italic; }
+    /* Unverified rows are shown, never hidden — silently dropping them hides drift. */
+    #analysis .unverified-row td { background: #fff6f6; }
+    #analysis table { table-layout: auto; }
+    #analysis td, #analysis th { vertical-align: top; }
   </style>
 </head>
 <body>
@@ -58,17 +84,48 @@
 
   <p class="toggle">
     <button type="button" id="pdf-btn" aria-pressed="true">PDF view</button
-    ><button type="button" id="text-btn" aria-pressed="false">Text view</button>
-    {% if change_records %}
-      <button type="button" id="analyze-btn" class="analyze">Analyze differences</button>
-    {% endif %}
+    ><button type="button" id="text-btn" aria-pressed="false">Text view</button
+    >{% if change_records %}<button type="button" id="analyze-btn" aria-pressed="false">Structured changes</button>{% endif %}
+    <span id="analyze-status" class="status"></span>
+    <span id="hover-wrap" hidden>
+      <label for="hover-select">Hover shows</label>
+      <select id="hover-select">
+        <option value="word">Word</option>
+        <option value="anchor">Anchor</option>
+        <option value="both">Anchor + values</option>
+      </select>
+    </span>
   </p>
+
+  {% if change_records %}
+    <p class="toggle rerun">
+      <label for="mode-select">Anchor source</label>
+      <select id="mode-select">
+        <option value="auto" {% if settings.anchor_mode == 'auto' %}selected{% endif %}>Auto</option>
+        <option value="local" {% if settings.anchor_mode == 'local' %}selected{% endif %}>Local only</option>
+        <option value="model" {% if settings.anchor_mode == 'model' %}selected{% endif %}
+                {% if not model_available %}disabled{% endif %}>Model</option>
+      </select>
+      <select id="model-select" {% if not model_available %}disabled{% endif %}>
+        {% for m in models %}
+          <option value="{{ m }}" {% if m == (settings.model or default_model) %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+      <button type="button" id="reevaluate-btn">Re-evaluate</button>
+      <span id="stale-note" class="status" hidden>settings changed — click Re-evaluate to refresh</span>
+      <span class="status">OCR: {{ ocr_mode }}{% if not model_available %} · no API key set{% endif %}</span>
+    </p>
+  {% endif %}
 
   <!-- The change records ride in the page and get POSTed back to /analyze, so the
        server keeps no state between the two requests (decisions.md D-04). -->
   <script type="application/json" id="changes">{{ change_records|tojson }}</script>
 
-  <table>
+  <div id="analysis">
+    {% if change_records %}<p class="empty">Click Re-evaluate to run structured analysis.</p>{% endif %}
+  </div>
+
+  <table id="diff-view">
     <thead>
       <tr>
         <th style="width:50%">Base <span class="source">{{ base_source }}</span></th>
@@ -89,6 +146,7 @@
                   <img src="data:image/png;base64,{{ side.png }}" alt="Page {{ row.page }}">
                   {% for box in side.boxes %}
                     <div class="box {{ box.tag }}" title="{{ box.word }}"
+                         data-word="{{ box.word }}" data-change-id="{{ box.change_id }}"
                          style="left:{{ box.left }}%; top:{{ box.top }}%; width:{{ box.width }}%; height:{{ box.height }}%"></div>
                   {% endfor %}
                 </div>
@@ -106,27 +164,102 @@
   <script>
     const pdfBtn = document.getElementById('pdf-btn');
     const textBtn = document.getElementById('text-btn');
-    function show(text) {
-      document.body.classList.toggle('text', text);
-      pdfBtn.setAttribute('aria-pressed', String(!text));
-      textBtn.setAttribute('aria-pressed', String(text));
-    }
-    pdfBtn.onclick = () => show(false);
-    textBtn.onclick = () => show(true);
-
     const analyzeBtn = document.getElementById('analyze-btn');
-    if (analyzeBtn) analyzeBtn.onclick = async () => {
-      analyzeBtn.disabled = true;
-      analyzeBtn.textContent = 'Analyzing…';
-      const res = await fetch('/analyze', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: document.getElementById('changes').textContent,
+    const reevaluateBtn = document.getElementById('reevaluate-btn');
+    const staleNote = document.getElementById('stale-note');
+    const hoverWrap = document.getElementById('hover-wrap');
+    const hoverSelect = document.getElementById('hover-select');
+    const status = document.getElementById('analyze-status');
+    const analysis = document.getElementById('analysis');
+    let rowsById = {};
+
+    // One function owns which view is up, so the three buttons can never disagree.
+    function show(view) {
+      document.body.classList.toggle('view-text', view === 'text');
+      document.body.classList.toggle('view-analysis', view === 'analysis');
+      pdfBtn.setAttribute('aria-pressed', String(view === 'pdf'));
+      textBtn.setAttribute('aria-pressed', String(view === 'text'));
+      if (analyzeBtn) analyzeBtn.setAttribute('aria-pressed', String(view === 'analysis'));
+    }
+    pdfBtn.onclick = () => show('pdf');
+    textBtn.onclick = () => show('text');
+    if (analyzeBtn) analyzeBtn.onclick = () => show('analysis');  // view only, never fetches
+
+    // Word is always available; anchor/values only once analysis has run at least once.
+    function applyHover() {
+      const mode = hoverSelect.value;
+      document.querySelectorAll('.box[data-change-id]').forEach((box) => {
+        const row = rowsById[box.dataset.changeId];
+        if (mode === 'word' || !row) { box.title = box.dataset.word; return; }
+        if (mode === 'anchor') { box.title = row.anchor || 'no anchor identified'; return; }
+        box.title = `${row.anchor || '—'}: ${row.base_value || '—'} → ${row.comp_value || '—'}`;
       });
-      // ponytail: /analyze returns a whole page, so swap the document rather than
-      // rebuilding the table in JS. document.write after load replaces it wholesale.
-      const html = await res.text();
-      document.open(); document.write(html); document.close();
+    }
+    if (hoverSelect) hoverSelect.onchange = applyHover;
+
+    function bindDownload() {
+      const btn = document.getElementById('download-btn');
+      if (btn) btn.onclick = () => {
+        const blob = new Blob([document.getElementById('rows').textContent],
+                              {type: 'application/json'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'changes.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+    }
+
+    const modeSelect = document.getElementById('mode-select');
+    const modelSelect = document.getElementById('model-select');
+
+    // Changing either control never re-runs anything by itself — just flags the
+    // visible table as stale until the user deliberately clicks Re-evaluate.
+    for (const sel of [modeSelect, modelSelect]) {
+      if (sel) sel.onchange = () => { staleNote.hidden = false; };
+    }
+
+    if (reevaluateBtn) reevaluateBtn.onclick = async () => {
+      reevaluateBtn.disabled = true;
+      status.className = 'status';
+      status.textContent = 'Analyzing…';
+      try {
+        const res = await fetch('/analyze', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            changes: JSON.parse(document.getElementById('changes').textContent),
+            settings: {
+              anchor_mode: modeSelect ? modeSelect.value : 'auto',
+              model: modelSelect && !modelSelect.disabled ? modelSelect.value : '',
+            },
+          }),
+        });
+        if (!res.ok) {
+          let detail = res.statusText;
+          try { detail = (await res.json()).detail || detail; } catch (e) {}
+          throw new Error(detail);
+        }
+        // A fragment, injected into this document — no navigation, so Back still works
+        // and the PDF/Text views stay one click away.
+        analysis.innerHTML = await res.text();
+        bindDownload();
+        rowsById = {};
+        const rowsEl = document.getElementById('rows');
+        if (rowsEl) {
+          for (const row of JSON.parse(rowsEl.textContent)) rowsById[row.id] = row;
+        }
+        hoverWrap.hidden = false;
+        applyHover();
+        staleNote.hidden = true;
+        status.textContent = '';
+        show('analysis');
+      } catch (err) {
+        status.className = 'status error';
+        status.textContent = 'Analysis failed: ' + err.message;
+      } finally {
+        reevaluateBtn.disabled = false;
+      }
     };
   </script>
 </body>

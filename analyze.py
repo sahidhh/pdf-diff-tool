@@ -22,13 +22,40 @@ ANCHOR_MAX_WORDS = 8  # longer than this is a sentence fragment, not a field nam
 # the same dump ran to 10+, so the two populations still separate cleanly.
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# Placeholder until the Phase 3 bake-off measures one (D-11). Env var, not hardcoded
-# mid-function, so swapping it needs no edit. One model, no fallback chain (D-08).
-MODEL = os.environ.get("PDF_DIFF_MODEL", "z-ai/glm-4.5-air")
+# The Phase 3 bake-off winner (D-20). Env var, not hardcoded mid-function, so swapping it
+# needs no edit. One model, no fallback chain (D-08).
+MODEL = os.environ.get("PDF_DIFF_MODEL", "qwen/qwen3-30b-a3b-instruct-2507")
+
+# The models /analyze will accept from a client. This is a security boundary, not a
+# convenience list: /analyze is unauthenticated and spends money, so a model identifier
+# arriving over HTTP is never forwarded to OpenRouter unless it appears here. Entries are
+# the bake-off candidates that completed (D-20); PDF_DIFF_MODEL is included so the env
+# override still works.
+ALLOWED_MODELS = tuple(
+    dict.fromkeys(
+        [
+            MODEL,
+            "qwen/qwen3-30b-a3b-instruct-2507",
+            "mistralai/mistral-nemo",
+            "openai/gpt-oss-20b",
+            "openai/gpt-5-nano",
+            "meta-llama/llama-3.1-8b-instruct",
+        ]
+    )
+)
 MAX_ESCALATED = 60  # cheap models degrade on long structured lists (§10); no chunking (D-09)
 
 # Thousands separators and currency marks vanish; other punctuation becomes a gap.
 _DROPPED_CHARS = str.maketrans("", "", ",$£€¥")
+
+
+def model_available():
+    """Whether the model tier can run at all.
+
+    Returns a boolean and nothing else — the key is never returned, rendered or logged,
+    so the form can say "no key set" without the key reaching a template (D-12).
+    """
+    return bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
 def normalise(s):
@@ -125,12 +152,15 @@ def _row(change, anchor, kind=None, source="local", verified=True):
     }
 
 
-def triage(changes):
+def triage(changes, resolve_locally=True):
     """(dropped, resolved, escalated) — architecture.md §7, rules applied in order.
 
-    The A2-only tier (D-22) does most of the work. The agreement gate above it still
-    fires on prose documents, where A1 is sound and its agreement with A2 earns the row
-    `high` confidence instead of `medium`.
+    Noise is always dropped locally: it is free to detect and there is nothing to judge.
+
+    `resolve_locally=False` sends everything that survives to the caller's escalated
+    bucket. That is the mode used when the model tier is on — A2 resolves a change like
+    "JAMES -> BEN JERRY" to the anchor "BEN JERRY", the changed value itself, so letting
+    it pre-empt the model would keep the worst anchors and only forward the hard ones.
     """
     dropped, resolved, escalated = [], [], []
     for change in changes:
@@ -139,8 +169,7 @@ def triage(changes):
             dropped.append(change)  # formatting noise: 1,000 vs 1000. Never sent, never charged.
             continue
 
-        # Every path cleans the same candidate the same way; only the confidence differs.
-        anchor = _label(change["a2_left"])
+        anchor = _label(change["a2_left"]) if resolve_locally else None
         if anchor is None:
             escalated.append(change)
         else:
@@ -155,22 +184,27 @@ def triage(changes):
 
 
 SYSTEM_PROMPT = """\
-You label differences found between two versions of a document.
+You label differences found between two versions of a printed document.
 
-For each change you are given the changed text on both sides, the words that surround \
-it in reading order, and the nearest label to its left on the same printed line.
+For each change you get the text that changed, and `region`: the lines of the document \
+around it, in the order they appear on the page. The changed text appears somewhere in \
+that region.
 
-The anchor is the field name or label the change belongs to — the thing a reader would \
-say changed, such as "Total cost" or "Effective date". It is not the changed value \
-itself and not a sentence fragment.
+Name the field the change belongs to — what a reader would say changed. On a form that \
+is the printed label of the box; in prose it is the subject of the sentence. Examples \
+of good anchors: "Total liabilities and capital", "Preparer's name", \
+"Principal product or service".
 
 Rules:
-- The two supplied context candidates may disagree. Pick the one that reads as a label.
-- Return values exactly as they were given to you. Do not reformat, complete or correct \
-them.
-- Do not invent an anchor. If no field name or label is identifiable, return null. An \
-honest null is more useful than a guess.
-- Return one entry per input id, and use the ids exactly as given.
+- Read the whole region. The label is often ABOVE the value, or continues onto the next \
+line. It is not always to the left.
+- The anchor is never the changed value itself, and never a whole sentence.
+- Prefer the printed label verbatim over a paraphrase, and drop line numbers and \
+cross-references around it ("22 Total liabilities and capital" -> "Total liabilities \
+and capital").
+- If the region contains no identifiable label — a bare checkbox, a lone figure — return \
+null. An honest null beats a guess; guesses are checked and will be flagged anyway.
+- Return one entry per input id, using the ids exactly as given.
 - kind is "value" when a quantity, date, amount or identifier changed, and "wording" \
 when the phrasing changed.\
 """
@@ -209,20 +243,22 @@ RESPONSE_FORMAT = {
 
 
 def _payload(index, change):
-    """One escalation entry, ~70 tokens (architecture.md §5.2).
+    """One escalation entry, ~150 tokens.
 
     `id` is the position in the escalated list, not the record's stable "{page}:{index}"
     id — it is a short integer for the model to echo, and `verify()` maps it straight
-    back. `box` is deliberately absent: the model cannot use coordinates, and `a2_left`
-    already encodes what the geometry meant.
+    back. `box` stays absent: the model cannot use coordinates, and `region` is what the
+    geometry was for.
+
+    `region` replaced the old before_ctx/after_ctx/label_left trio. Those were three
+    guesses at where the label lived; on grid forms all three were wrong and the model
+    could only pick the least bad (D-20). The region makes no guess.
     """
     return {
         "id": index,
         "before": " ".join(change["before"]),
         "after": " ".join(change["after"]),
-        "before_ctx": change["a1_left"],
-        "after_ctx": change["a1_right"],
-        "label_left": change["a2_left"],
+        "region": change.get("window") or [change["a1_left"], change["a2_left"]],
     }
 
 
@@ -298,20 +334,23 @@ def verify(returned, escalated):
         seen.add(index)
         change = escalated[index]
         before, after = " ".join(change["before"]), " ".join(change["after"])
-        # Anchors are checked against the CONTEXT only, never against before/after.
-        # Including the changed values let a model return the changed value itself as
-        # the anchor and still verify — qwen3-30b answered "DEVELOPMENT" for a
-        # "DEPLOYEMENT -> DEVELOPMENT" change and passed. An anchor is the label, and
-        # a label never lives in the span that changed.
-        context = " ".join([change["a1_left"], change["a1_right"], change["a2_left"]])
+        # The region we sent includes the changed line, so "anchor appears in context" is
+        # necessary but not sufficient: qwen3-30b once answered "DEVELOPMENT" for a
+        # "DEPLOYEMENT -> DEVELOPMENT" change and passed on that test alone. A label is
+        # never the span that changed, so require both.
+        context = " ".join(
+            [change["a1_left"], change["a1_right"], change["a2_left"], *change.get("window", [])]
+        )
+        anchor = item.get("anchor")
         verified = (
             _echoes(before, item.get("base_value"))
             and _echoes(after, item.get("comp_value"))
-            and _echoes(context, item.get("anchor"))
+            and _echoes(context, anchor)
+            and not (anchor and (_echoes(before, anchor) or _echoes(after, anchor)))
         )
         failures += not verified
         kind = item.get("kind") if item.get("kind") in ("value", "wording") else None
-        rows.append(_row(change, item.get("anchor"), kind, "model", verified))
+        rows.append(_row(change, anchor, kind, "model", verified))
 
     for index, change in enumerate(escalated):
         if index not in seen:  # over the cap, or the model just skipped it
@@ -330,14 +369,17 @@ def _order(row):
     return int(page), int(index.lstrip("+"))  # "+" marks a comp-stream index
 
 
-def analyze(changes, use_model=False, model=None):
-    """Full pipeline. Local by default; the model tier is opt-in (D-22).
+def analyze(changes, use_model=None, model=None):
+    """Full pipeline: triage, resolve anchors, verify, merge, order.
 
-    The Phase 3 bake-off measured the model returning `a2_left` verbatim on 17 of 19
-    changes — a paid pass-through of the anchor A2 already found. `use_model=True` keeps
-    it available for a corpus where A1 works and the A1/A2 choice is real work again.
+    `use_model` defaults to whether a key is configured. The model reads the layout
+    region (D-23) rather than choosing between two pre-chewed candidates, which is what
+    made it a pass-through in the D-20 bake-off. Without a key the local A2 tier still
+    runs — worse anchors, but free and offline, and the page says which one ran.
     """
-    _, resolved, escalated = triage(changes)
+    if use_model is None:
+        use_model = model_available()
+    _, resolved, escalated = triage(changes, resolve_locally=not use_model)
     if escalated and use_model:
         rows = resolved + verify(ask_model(escalated, model), escalated)
     else:
@@ -405,8 +447,9 @@ def _demo():
     assert _label("ASPEN FINANCIAL INSURANCE SERV 81-1079414PARTNERSHI OC") is None
     assert _label("of PR SWANNANOA, NC 28778 number of PR") is None
 
-    # Local-only pipeline: no model, and nothing silently disappears.
-    rows = analyze([noise, colon, agree, disagree, unanchored])
+    # Local-only pipeline: no model, and nothing silently disappears. use_model is pinned
+    # False so this self-check never touches the network, whatever is in the environment.
+    rows = analyze([noise, colon, agree, disagree, unanchored], use_model=False)
     assert len(rows) == 4, rows  # noise dropped, the other four all present
     assert all(r["source"] == "local" for r in rows)
     assert any(r["anchor"] is None and r["confidence"] == "low" for r in rows)
@@ -452,10 +495,21 @@ def _demo():
     # A verified row whose two anchor methods disagreed is medium, not high (§14).
     assert good["confidence"] == "medium", good
 
-    # The changed value is not an anchor, even though we did send it.
+    # The changed value is not an anchor, even though we did send it — and it stays
+    # rejected when the region we sent legitimately contains that value.
+    windowed = [dict(sent[0], window=["Total cost 500 per unit", "Total cost 550 per unit"])]
     parroted = verify([{"id": 0, "anchor": "550", "base_value": "500",
-                        "comp_value": "550", "kind": "value"}], sent[:1])
+                        "comp_value": "550", "kind": "value"}], windowed)
     assert parroted[0]["verified"] is False, parroted
+    # A real label out of that same region still verifies.
+    good_from_window = verify([{"id": 0, "anchor": "Total cost", "base_value": "500",
+                                "comp_value": "550", "kind": "value"}], windowed)
+    assert good_from_window[0]["verified"] is True, good_from_window
+
+    # Model mode does not let A2 pre-empt it: everything non-noise escalates.
+    _, local_rows, to_model = triage([noise, colon, agree], resolve_locally=False)
+    assert local_rows == [] and len(to_model) == 2, (local_rows, to_model)
+    assert _payload(0, sent[0])["region"], "payload must carry a region"
 
     # An honest null anchor verifies, but resolved nothing — never a confident row.
     declined = verify([{"id": 0, "anchor": None, "base_value": "500",

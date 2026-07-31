@@ -55,6 +55,25 @@ def _box(rect, width, height):
     }
 
 
+OCR_MODES = ("auto", "force", "off")
+
+
+def tesseract_available():
+    """Whether OCR can actually run, so the UI can grey out "force" instead of lying.
+
+    Asks pytesseract for the binary's version rather than looking on PATH: the README
+    documents the Windows install landing somewhere PATH does not cover, with
+    `tesseract_cmd` pointed at it, and `shutil.which` reports a false negative there.
+    """
+    try:
+        import pytesseract
+
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:  # not installed, not importable, or binary not where it says
+        return False
+
+
 def _ocr_words(page):
     """Rasterize a scanned page and read words + boxes back out with tesseract."""
     # ponytail: imported lazily so native-text PDFs work without the tesseract binary
@@ -141,15 +160,27 @@ def clean(words):
     return out
 
 
-def extract_pages(pdf_bytes):
-    """Return [Page] — words with boxes, an OCR flag, and a rendered page image."""
+def extract_pages(pdf_bytes, ocr_mode="auto"):
+    """Return [Page] — words with boxes, an OCR flag, and a rendered page image.
+
+    `ocr_mode` decides when tesseract runs:
+      auto  — only where the page has no text layer (the original behaviour)
+      force — every page, ignoring any text layer; for PDFs whose embedded text is
+              present but wrong, where "auto" would never notice
+      off   — never; a scanned page then yields no tokens and reads as blank rather
+              than silently costing an OCR pass
+    """
+    if ocr_mode not in OCR_MODES:
+        raise ValueError(f"ocr_mode must be one of {OCR_MODES}, got {ocr_mode!r}")
     pages = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for number, page in enumerate(doc, start=1):
             words = [(w[4], w[:4]) for w in page.get_text("words")]
-            ocr = not words
+            ocr = ocr_mode == "force" or (ocr_mode == "auto" and not words)
             if ocr:
                 words = normalize_ocr(_ocr_words(page))
+            elif ocr_mode == "off" and not words:
+                words = []  # scanned page, OCR declined — blank, not silently OCR'd
             width, height = page.rect.width, page.rect.height
             tokens = [Token(number, text, _box(rect, width, height)) for text, rect in clean(words)]
             png = page.get_pixmap(dpi=RENDER_DPI).tobytes("png")
@@ -186,11 +217,16 @@ def diff_sides(base_tokens, edited_tokens):
         autojunk=False,  # autojunk drops common words as "popular" and ruins word diffs
     )
 
-    def add(bucket, tokens, tag):
+    # Same id scheme as changes() below — keep the two formulas in sync, they're how
+    # the frontend joins a highlight box back to its structured-analysis row.
+    base_index = _by_page(base_tokens)[1]
+    comp_index = _by_page(edited_tokens)[1]
+
+    def add(bucket, tokens, tag, change_id):
         for token in tokens:
             side = bucket.setdefault(token.page, {"boxes": [], "segments": []})
             if tag != "equal":
-                side["boxes"].append({**token.box, "tag": tag, "word": token.word})
+                side["boxes"].append({**token.box, "tag": tag, "word": token.word, "change_id": change_id})
             segments = side["segments"]
             if segments and segments[-1]["tag"] == tag:
                 segments[-1]["words"].append(token.word)
@@ -199,10 +235,16 @@ def diff_sides(base_tokens, edited_tokens):
 
     left, right = {}, {}
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        before, after = base_tokens[i1:i2], edited_tokens[j1:j2]
+        change_id = None
+        if tag != "equal":
+            head = (before or after)[0]
+            index = base_index if before else comp_index
+            change_id = "%d:%s%d" % (head.page, "" if before else "+", index[id(head)])
         if tag != "insert":
-            add(left, base_tokens[i1:i2], "equal" if tag == "equal" else "delete")
+            add(left, before, "equal" if tag == "equal" else "delete", change_id)
         if tag != "delete":
-            add(right, edited_tokens[j1:j2], "equal" if tag == "equal" else "insert")
+            add(right, after, "equal" if tag == "equal" else "insert", change_id)
     return left, right
 
 
@@ -246,6 +288,46 @@ def _a2_left(page_tokens, box):
     return " ".join(reversed(words))
 
 
+CONTEXT_LINES_ABOVE = 3  # form labels sit above their fields far more often than beside
+CONTEXT_LINES_BELOW = 1  # ...but not always: "Mortgages, notes, bonds payable" sits below
+CONTEXT_LEFT_SWEEP = 45  # page-% to sweep left; wider pulls in the neighbouring column
+
+
+def _visual_lines(page_tokens):
+    """Bucket a page's tokens into visual lines, each ordered left to right.
+
+    This is reading order rebuilt from coordinates. `page.get_text("words")` interleaves
+    columns on grid layouts, which is what makes A1 unusable on forms (D-21) — the boxes
+    were always the better source, they just were not being used for ordering.
+    """
+    lines = []
+    for token in sorted(page_tokens, key=lambda t: (t.box["top"], t.box["left"])):
+        if lines and abs(token.box["top"] - lines[-1][0].box["top"]) < (
+            SAME_LINE_TOL * token.box["height"]
+        ):
+            lines[-1].append(token)
+        else:
+            lines.append([token])
+    return [sorted(line, key=lambda t: t.box["left"]) for line in lines]
+
+
+def _context_window(lines, box):
+    """The text around `box`, in true reading order — anchor method A3.
+
+    A1 gives reading-order words and A2 gives the nearest left neighbour; both commit to
+    a guess about *where* the label lives. This commits to nothing: it hands back the
+    neighbourhood and lets the reader decide. On a 1065 that is the difference between
+    "BEN JERRY" (the changed value) and "Print/Type preparer's name".
+    """
+    here = min(range(len(lines)), key=lambda i: abs(lines[i][0].box["top"] - box["top"]))
+    window = []
+    for line in lines[max(0, here - CONTEXT_LINES_ABOVE) : here + 1 + CONTEXT_LINES_BELOW]:
+        words = [t.word for t in line if t.box["left"] > box["left"] - CONTEXT_LEFT_SWEEP]
+        if words:
+            window.append(" ".join(words))
+    return window
+
+
 def _by_page(tokens):
     """(page -> [token], id(token) -> index within its page) for `id` and A2 lookups."""
     pages, index = {}, {}
@@ -267,6 +349,13 @@ def changes(base_tokens, comp_tokens):
     )
     base_by_page, base_index = _by_page(base_tokens)
     comp_by_page, comp_index = _by_page(comp_tokens)
+    line_cache = {}  # (is_comp, page) -> visual lines; built once, read by every change
+
+    def lines_for(by_page, page, is_comp):
+        key = (is_comp, page)
+        if key not in line_cache:
+            line_cache[key] = _visual_lines(by_page[page])
+        return line_cache[key]
 
     records = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -294,6 +383,9 @@ def changes(base_tokens, comp_tokens):
                 "a1_left": a1_left,
                 "a1_right": a1_right,
                 "a2_left": _a2_left(by_page[head.page], head.box),
+                "window": _context_window(
+                    lines_for(by_page, head.page, not before), head.box
+                ),
             }
         )
     return records
@@ -309,11 +401,11 @@ def source_label(pages):
     return "mixed — OCR on page %s" % ", ".join(str(n) for n in ocr)
 
 
-def compare(base_bytes, edited_bytes):
+def compare(base_bytes, edited_bytes, ocr_mode="auto"):
     """Full pipeline: two PDFs in, render-ready page rows out."""
     started = time.perf_counter()
-    base_pages = extract_pages(base_bytes)
-    edited_pages = extract_pages(edited_bytes)
+    base_pages = extract_pages(base_bytes, ocr_mode)
+    edited_pages = extract_pages(edited_bytes, ocr_mode)
     pairs = align_pages(base_pages, edited_pages)
     base_tokens = tokenize(p for p, _ in pairs if p)
     edited_tokens = tokenize(c for _, c in pairs if c)
@@ -392,6 +484,22 @@ def _demo():
     rule = [(w, (0, 0, 1, 1)) for w in "7 mmm mmm mmm mmm 12 12 12".split()]
     assert [w for w, _ in clean(rule)] == ["7", "12", "12", "12"], clean(rule)
 
+    # OCR modes. "off" must never reach tesseract, which is the point of having it —
+    # a scanned page reads as blank rather than silently costing an OCR pass.
+    blank = fitz.open()
+    blank.new_page()
+    scanned = blank.tobytes()
+    blank.close()
+    assert extract_pages(scanned, "off")[0].tokens == []
+    assert extract_pages(scanned, "off")[0].ocr is False
+    assert extract_pages(base, "off")[0].tokens, "a text layer still reads with OCR off"
+    try:
+        extract_pages(base, "sometimes")
+    except ValueError as exc:
+        assert "ocr_mode" in str(exc), exc
+    else:
+        raise AssertionError("an unknown ocr_mode must be rejected")
+
     # Index alignment: N pages in, N pairs out; ragged lengths pad with None.
     base_pages, edited_pages = extract_pages(base), extract_pages(edited)
     assert align_pages(base_pages, edited_pages) == list(zip(base_pages, edited_pages))
@@ -413,6 +521,10 @@ def _demo():
     # 4 words, and the equal run legitimately spans the page break (D-19).
     assert c[0]["a1_right"] == "dollars per unit Second", c[0]["a1_right"]
     assert c[0]["a2_left"], "geometric neighbour must resolve on a single-line fixture"
+    # A box and its change record must carry the same id, so the frontend can join
+    # a highlight to its structured-analysis row.
+    assert page1["base"]["boxes"][0]["change_id"] == c[0]["id"], page1["base"]["boxes"][0]
+    assert page1["edited"]["boxes"][0]["change_id"] == c[0]["id"], page1["edited"]["boxes"][0]
 
     # A2 pinned independently of the diff: same line to the left wins, other lines lose.
     line = [
@@ -432,6 +544,19 @@ def _demo():
     ]
     assert _a2_left(form, form[3].box) == "Name:", _a2_left(form, form[3].box)
     assert _a2_left(form, form[1].box) == "Amount:", _a2_left(form, form[1].box)
+
+    # A3: the label sits on the line ABOVE, where neither A1 nor A2 can reach it.
+    grid = [
+        Token(1, "Preparer's", {"left": 10, "top": 10, "width": 9, "height": 2}),
+        Token(1, "name", {"left": 22, "top": 10, "width": 5, "height": 2}),
+        Token(1, "BEN", {"left": 10, "top": 14, "width": 5, "height": 2}),
+        Token(1, "JERRY", {"left": 17, "top": 14, "width": 6, "height": 2}),
+    ]
+    lines = _visual_lines(grid)
+    assert [len(line) for line in lines] == [2, 2], lines  # two rows, not one, not four
+    assert _context_window(lines, grid[2].box) == ["Preparer's name", "BEN JERRY"]
+    # Reading order comes from coordinates, so shuffled input still lines up correctly.
+    assert _visual_lines(grid[::-1]) == lines
 
     print("diff_engine self-check OK")
 

@@ -60,14 +60,15 @@ In full:
                     ┌───────────────┴────────────────┐                   │
                     ▼                                ▼                   │
              diff_sides()                      changes()   ◀── NEW       │
-        (boxes + segments for render,      (paired changes, enriched     │
-         UNCHANGED behaviour)               with A1 + A2 anchors)        │
+        (boxes + segments for render;     (paired changes, enriched     │
+         each box also carries the        with A1 + A2 anchors)          │
+         same change_id as its row)                                      │
                     │                                │                   │
                     ▼                                ▼                   │
               result.html ◀──────── embeds ──── change JSON ─────────────┘
                     │              <script type="application/json" id="changes">
                     │
-         [user clicks "Analyze differences"]
+         [user clicks "Re-evaluate" — tab switches and dropdown edits never fire this]
                     │   fetch POST /analyze   (body = the embedded blob)
                     ▼
  ┌────────────────────────────────────────────────────────────────────┐
@@ -371,10 +372,10 @@ Logged (stdout or a log file), not user-facing. Plain logging — no metrics bac
 
 | File | Change |
 |---|---|
-| `diff_engine.py` | Add `align_pages()` (§19, index pairing), `changes()`, `_a1_context()`, `_a2_left()`, `normalize_ocr()`, constants. Extend `_demo()` with asserts. Add a dump mode. **`compare()` and `diff_sides()` behaviour unchanged.** |
+| `diff_engine.py` | Add `align_pages()` (§19, index pairing), `changes()`, `_a1_context()`, `_a2_left()`, `normalize_ocr()`, constants. `diff_sides()` boxes now carry `change_id`, the same id as their `changes()` row, so a highlight can look up its anchor. Extend `_demo()` with asserts. Add a dump mode. |
 | `analyze.py` | New. Triage, confidence, model call, verification, merge, metrics logging. |
 | `app.py` | New `POST /analyze` route. Embed change JSON in the `/compare` response context. |
-| `templates/result.html` | Embed the JSON blob; add the "Analyze differences" button. |
+| `templates/result.html` | Embed the JSON blob; add the "Structured changes" tab, a "Re-evaluate" button (the only thing that fetches `/analyze`), and a "Hover shows" dropdown that switches PDF-view tooltips between the word and its resolved anchor/values. |
 | `templates/analyze.html` | New. Results table. |
 | `requirements.txt` | `openai` |
 

@@ -328,6 +328,13 @@ stays in the codebase but is off unless `PDF_DIFF_USE_MODEL=1`. Default behaviou
 no network call, so the tool is local-only again as `pdf-diff-tool-spec.md` line 6 always
 wanted.
 
+**Superseded.** `PDF_DIFF_USE_MODEL` is gone. The upload form and the result page now
+carry an explicit "Anchor source" choice (`auto` / `local` / `model`) per request,
+validated server-side (`app.py:_validated_settings`, `analyze.ALLOWED_MODELS`) — "auto"
+still defers to the model only when `OPENROUTER_API_KEY` is set
+(`analyze.model_available()`), which is this decision's default preserved, just moved
+from an env flag to a request-scoped setting the user can see and change.
+
 **Measured, same 1065 pair, 20 raw changes:**
 
 | | Before (model tier) | After (A2-only) |

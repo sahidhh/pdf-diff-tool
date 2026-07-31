@@ -9,6 +9,14 @@
     label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
     .error { background: #fdd; border-left: 4px solid #c00; padding: 0.75rem; }
     button { display: block; margin-top: 1.5rem; padding: 0.5rem 1.25rem; font-size: 1rem; }
+    fieldset { margin-top: 2rem; border: 1px solid #ddd; border-radius: 4px; padding: 0 1rem 1rem; }
+    legend { font-weight: 600; padding: 0 0.4rem; }
+    .choice { display: block; margin: 0.3rem 0; font-weight: normal; }
+    .choice input { margin-right: 0.4rem; }
+    .why { color: #888; font-size: 0.85rem; font-style: italic; }
+    .hint { color: #666; font-size: 0.85rem; margin: 0.15rem 0 0.75rem; }
+    select { width: 100%; padding: 0.3rem; }
+    input:disabled + span, .choice:has(input:disabled) { color: #999; }
   </style>
 </head>
 <body>
@@ -21,7 +29,80 @@
     <label for="edited">Edited PDF</label>
     <input id="edited" type="file" name="edited" accept="application/pdf" required>
 
+    <fieldset>
+      <legend>Settings</legend>
+
+      <label>Anchor source</label>
+      <p class="hint">Which tier names the field each change belongs to.</p>
+      <label class="choice">
+        <input type="radio" name="anchor_mode" value="auto" checked>
+        <span>Auto — use the model when a key is set, otherwise local</span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="anchor_mode" value="local">
+        <span>Local only — nothing leaves this machine</span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="anchor_mode" value="model" {% if not model_available %}disabled{% endif %}>
+        <span>Model — send the region around each change to OpenRouter</span>
+        {% if not model_available %}<span class="why">OPENROUTER_API_KEY is not set</span>{% endif %}
+      </label>
+
+      <label for="model">Model</label>
+      <select id="model" name="model" {% if not model_available %}disabled{% endif %}>
+        {% for m in models %}
+          <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Only used when the anchor source is Model, or Auto with a key set.</p>
+
+      <label>OCR</label>
+      <p class="hint">Whether to read scanned pages with tesseract.</p>
+      <label class="choice">
+        <input type="radio" name="ocr_mode" value="auto" checked>
+        <span>Auto — only pages with no text layer</span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="ocr_mode" value="force" {% if not tesseract_available %}disabled{% endif %}>
+        <span>Force — every page, even where text exists</span>
+        {% if not tesseract_available %}<span class="why">tesseract not found</span>{% endif %}
+      </label>
+      <label class="choice">
+        <input type="radio" name="ocr_mode" value="off">
+        <span>Off — scanned pages read as blank</span>
+      </label>
+    </fieldset>
+
     <button type="submit">Compare</button>
   </form>
+
+  <script>
+    // Settings live in the browser, so the app keeps no state between requests.
+    const form = document.querySelector('form');
+    const KEY = 'pdf-diff-settings';
+    const FIELDS = ['anchor_mode', 'ocr_mode', 'model'];
+
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+      for (const name of FIELDS) {
+        if (!saved[name]) continue;
+        const field = form.elements[name];
+        // A disabled choice means the machine can't do it — a stale preference for it
+        // must not silently re-select something the server would reject.
+        const target = field instanceof RadioNodeList
+          ? [...field].find(r => r.value === saved[name] && !r.disabled)
+          : (!field.disabled && [...field.options].some(o => o.value === saved[name]) ? field : null);
+        if (!target) continue;
+        if (target instanceof HTMLSelectElement) target.value = saved[name];
+        else target.checked = true;
+      }
+    } catch (e) { /* corrupt or unavailable storage is not worth failing the page over */ }
+
+    form.addEventListener('submit', () => {
+      const data = new FormData(form);
+      const keep = Object.fromEntries(FIELDS.map(n => [n, data.get(n)]));
+      try { localStorage.setItem(KEY, JSON.stringify(keep)); } catch (e) {}
+    });
+  </script>
 </body>
 </html>
